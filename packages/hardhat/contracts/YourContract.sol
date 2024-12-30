@@ -1,78 +1,141 @@
-//SPDX-License-Identifier: MIT
-pragma solidity >=0.8.0 <0.9.0;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-// Useful for debugging. Remove when deploying to a live network.
-import "hardhat/console.sol";
-
-// Use openzeppelin to inherit battle-tested implementations (ERC20, ERC721, etc)
-// import "@openzeppelin/contracts/access/Ownable.sol";
-
-/**
- * A smart contract that allows changing a state variable of the contract and tracking the changes
- * It also allows the owner to withdraw the Ether in the contract
- * @author BuidlGuidl
- */
-contract YourContract {
-    // State Variables
-    address public immutable owner;
-    string public greeting = "Building Unstoppable Apps!!!";
-    bool public premium = false;
-    uint256 public totalCounter = 0;
-    mapping(address => uint) public userGreetingCounter;
-
-    // Events: a way to emit log statements from smart contract that can be listened to by external parties
-    event GreetingChange(address indexed greetingSetter, string newGreeting, bool premium, uint256 value);
-
-    // Constructor: Called once on contract deployment
-    // Check packages/hardhat/deploy/00_deploy_your_contract.ts
-    constructor(address _owner) {
-        owner = _owner;
+contract RentalDeposit {
+    struct Lease {
+        address landlord;
+        address tenant;
+        uint256 depositAmount;
+        uint256 startDate;
+        uint256 endDate;
+        bool isActive;
+        bool landlordApproved;
+        bool depositWithdrawn;
     }
 
-    // Modifier: used to define a set of rules that must be met before or after a function is executed
-    // Check the withdraw() function
-    modifier isOwner() {
-        // msg.sender: predefined variable that represents address of the account that called the current function
-        require(msg.sender == owner, "Not the Owner");
+    Lease[] public leases;
+
+    event LeaseCreated(
+        uint256 leaseId,
+        address indexed landlord,
+        address indexed tenant,
+        uint256 depositAmount,
+        uint256 startDate,
+        uint256 endDate
+    );
+    event DepositWithdrawn(uint256 leaseId, address indexed landlord);
+    event DepositReturned(uint256 leaseId, address indexed tenant);
+    event LandlordApproved(uint256 leaseId);
+
+    modifier onlyLandlord(uint256 _leaseId) {
+        require(msg.sender == leases[_leaseId].landlord, "Only the landlord can perform this action");
         _;
     }
 
-    /**
-     * Function that allows anyone to change the state variable "greeting" of the contract and increase the counters
-     *
-     * @param _newGreeting (string memory) - new greeting to save on the contract
-     */
-    function setGreeting(string memory _newGreeting) public payable {
-        // Print data to the hardhat chain console. Remove when deploying to a live network.
-        console.log("Setting new greeting '%s' from %s", _newGreeting, msg.sender);
-
-        // Change state variables
-        greeting = _newGreeting;
-        totalCounter += 1;
-        userGreetingCounter[msg.sender] += 1;
-
-        // msg.value: built-in global variable that represents the amount of ether sent with the transaction
-        if (msg.value > 0) {
-            premium = true;
-        } else {
-            premium = false;
-        }
-
-        // emit: keyword used to trigger an event
-        emit GreetingChange(msg.sender, _newGreeting, msg.value > 0, msg.value);
+    modifier onlyTenant(uint256 _leaseId) {
+        require(msg.sender == leases[_leaseId].tenant, "Only the tenant can perform this action");
+        _;
     }
 
-    /**
-     * Function that allows the owner to withdraw all the Ether in the contract
-     * The function can only be called by the owner of the contract as defined by the isOwner modifier
-     */
-    function withdraw() public isOwner {
-        (bool success, ) = owner.call{ value: address(this).balance }("");
-        require(success, "Failed to send Ether");
+    modifier leaseExists(uint256 _leaseId) {
+        require(_leaseId < leases.length, "Lease does not exist");
+        _;
     }
 
-    /**
-     * Function that allows the contract to receive ETH
-     */
+    function createLease(
+        address _landlord,
+        uint256 _depositAmount,
+        uint256 _startDate,
+        uint256 _endDate
+    ) public payable {
+        require(msg.value == _depositAmount, "Sent value does not match deposit amount");
+        require(_startDate < _endDate, "Start date must be before end date");
+
+        Lease memory newLease = Lease({
+            landlord: _landlord,
+            tenant: msg.sender,
+            depositAmount: _depositAmount,
+            startDate: _startDate,
+            endDate: _endDate,
+            isActive: true,
+            landlordApproved: false,
+            depositWithdrawn: false
+        });
+
+        leases.push(newLease);
+        uint256 leaseId = leases.length - 1;
+
+        emit LeaseCreated(leaseId, _landlord, msg.sender, _depositAmount, _startDate, _endDate);
+    }
+
+    function approveDepositReturn(uint256 _leaseId) public leaseExists(_leaseId) onlyLandlord(_leaseId) {
+        Lease storage lease = leases[_leaseId];
+        require(lease.isActive, "Lease is not active");
+
+        lease.landlordApproved = true;
+        emit LandlordApproved(_leaseId);
+    }
+
+    function withdrawDeposit(uint256 _leaseId) public leaseExists(_leaseId) onlyLandlord(_leaseId) {
+        Lease storage lease = leases[_leaseId];
+        require(block.timestamp > lease.endDate, "Lease period has not ended yet");
+        require(lease.isActive, "Lease is not active");
+        require(!lease.depositWithdrawn, "Deposit has already been withdrawn");
+
+        lease.isActive = false;
+        lease.depositWithdrawn = true;
+        payable(lease.landlord).transfer(lease.depositAmount);
+
+        emit DepositWithdrawn(_leaseId, lease.landlord);
+    }
+
+    function returnDeposit(uint256 _leaseId) public leaseExists(_leaseId) onlyTenant(_leaseId) {
+        Lease storage lease = leases[_leaseId];
+        require(block.timestamp > lease.endDate, "Lease period has not ended yet");
+        require(lease.isActive, "Lease is not active");
+        require(lease.landlordApproved, "Landlord has not approved the deposit return");
+        require(!lease.depositWithdrawn, "Deposit has already been withdrawn");
+
+        lease.isActive = false;
+        lease.depositWithdrawn = true;
+        payable(lease.tenant).transfer(lease.depositAmount);
+
+        emit DepositReturned(_leaseId, lease.tenant);
+    }
+
+    function getLeaseDetails(uint256 _leaseId)
+        public
+        view
+        leaseExists(_leaseId)
+        returns (
+            address landlord,
+            address tenant,
+            uint256 depositAmount,
+            uint256 startDate,
+            uint256 endDate,
+            bool isActive,
+            bool landlordApproved,
+            bool depositWithdrawn
+        )
+    {
+        Lease storage lease = leases[_leaseId];
+        return (
+            lease.landlord,
+            lease.tenant,
+            lease.depositAmount,
+            lease.startDate,
+            lease.endDate,
+            lease.isActive,
+            lease.landlordApproved,
+            lease.depositWithdrawn
+        );
+    }
+
+    function getLeaseCount() public view returns (uint256) {
+        return leases.length;
+    }
+
     receive() external payable {}
+
+    fallback() external payable {}
 }
